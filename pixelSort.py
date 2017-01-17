@@ -1,4 +1,5 @@
 from PIL import Image
+from PIL import ImageFile
 import sys
 import os
 import argparse
@@ -7,6 +8,10 @@ from constants import *
 import time
 import random
 import math
+import imageio
+import re
+from subprocess import call
+import shutil
 
 
 # User defined constants
@@ -30,6 +35,13 @@ global rowCount, columnCount
 global interval
 global randomInterval
 
+global pixelSnapshots
+global currentRowOrCol
+global snapshotsPerRowOrCol
+
+global iterationCount
+iterationCount = 0
+
 ################################################################################
 #
 #                                   Main()
@@ -37,17 +49,131 @@ global randomInterval
 ################################################################################
 
 def main():
-    getSettings()
+    global KEEP_TEMP_FILES
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
 
     # Get start time
     startTime = time.time()
+
+    getSettings()
+
+    if createGIF:
+        createGIFTemporaryFiles()
+
     sortImage()
+
+    if createGIF:
+        print "Pixel sort complete. Creating GIF..."
+        createImagesFromSnapshot()
+        createGIFFromImages()
+        if not KEEP_TEMP_FILES:
+            removeGIFTemporaryFiles()
+
 
     print "Done! Pixel sort took %i seconds.               " % (time.time() - startTime)
 
     image.show()
 
-    saveImage()
+    saveImage("_output", False)
+
+################################################################################
+#
+#                                   I/O
+#
+################################################################################
+
+def createGIFFromImages():
+    # Images to mp4
+    os.system("ffmpeg -r 60 -i temp/%8d.png -c:v libx264 out.mp4")
+    # ffmpeg -r 60 -i temp/%3d.png -c:v libx264 out.mp4
+
+    # Create a palatte
+    # ffmpeg -y -i out.mp4 -vf fps=60,scale=320:-1:flags=lanczos,palettegen palette.png
+    os.system("ffmpeg -y -i out.mp4 -vf fps=60,scale=600:-1:flags=lanczos,palettegen palette.png")
+
+    # Create GIF
+    # ffmpeg -i out.mp4 -filter_complex "fps=60,scale=320:-1:flags=lanczos[x];[x][1:v]paletteuse" output.gif
+    os.system("ffmpeg -i out.mp4 -i palette.png -filter_complex \"fps=60,scale=600:-1:flags=lanczos[x];[x][1:v]paletteuse\" out.gif")
+
+def createGIFTemporaryFiles():
+    global height, width, pixelSnapshots, SORT_BY_ROWS, SORT_BY_COLUMNS
+    print "Creating temporary data structures for GIF creation."
+
+    if not os.path.exists(TEMP_FILE_LOCATION):
+        os.makedirs(TEMP_FILE_LOCATION)
+
+    if SORT_BY_COLUMNS:
+        pixelSnapshots = [0] * height
+        for ii in range(0, height):
+            pixelSnapshots[ii] = []
+
+    elif SORT_BY_ROWS:
+        pixelSnapshots = [0] * width
+        for ii in range(0, width):
+            pixelSnapshots[ii] = []
+    
+def removeGIFTemporaryFiles():
+    shutil.rmtree(TEMP_FILE_LOCATION)
+
+
+def saveSnapshot(pixelLine):
+    global pixelSnapshots#, SORT_BY_COLUMNS, SORT_BY_ROWS, height, width, imagePixels, currentRowOrCol
+
+    pixelSnapshots[currentRowOrCol].append(pixelLine)
+
+def createImagesFromSnapshot():
+    global frameCount, width, height, pixelSnapshots
+
+    # Determine largest number of frames
+    frameCount = 0
+    for i in range(0, len(pixelSnapshots)):
+        if len(pixelSnapshots[i]) > frameCount:
+            frameCount = len(pixelSnapshots)
+
+    # For each frame...
+    for frameNumber in range(0, len(pixelSnapshots[0])):
+        # Create an image
+        frame = Image.new("RGB", (width, height))
+        framePixels = frame.load()
+
+        # Color the image
+
+        # For each row
+        for row in range(0, height):
+            # For each column
+            try:
+                rowOfPixels = pixelSnapshots[row][frameNumber]
+            except:
+                rowOfPixels = pixelSnapshots[row][len(pixelSnapshots[row]) - 1]
+            for col in range(0, width):
+                framePixels[col, row] = rowOfPixels[col]
+
+        # Save image
+        sys.stdout.write("Saving frame: %i/%i   \r" % (frameNumber, frameCount) )
+        sys.stdout.flush()
+        saveName = TEMP_FILE_LOCATION + "/%08i" % frameNumber + ".png"
+        frame.save(saveName)
+
+def saveImage(fileSuffixName, isTemp):
+    global fileName, image
+    baseName = os.path.splitext(fileName)[0]
+    saveName = ""
+
+    if isTemp:
+        saveName = TEMP_FILE_LOCATION + fileSuffixName + ".png"
+    else:
+        saveName = baseName + fileSuffixName + ".png"
+
+    try:
+        image.save(saveName)
+    except:
+        print "Error: Cannot save as png. Attempting to save as jpg."
+        if isTemp:
+            saveName = TEMP_FILE_LOCATION + fileSuffixName + ".jpg"
+        else:
+            saveName = baseName + fileSuffixName + ".jpg"
+        image.save(saveName)
+
 
 ################################################################################
 #
@@ -56,12 +182,14 @@ def main():
 ################################################################################
 
 def sortImage():
-    global imagePixels, image, height, width, SORT_BY_ROWS, SORT_BY_COLUMNS, SORT_BY_CIRCLE, ALGORITHM, interval, randomInterval
+    global imagePixels, image, height, width, SORT_BY_ROWS, SORT_BY_COLUMNS, SORT_BY_CIRCLE, ALGORITHM, interval, randomInterval, currentRowOrCol
 
     if SORT_BY_ROWS:
         # Sort by rows
         print "Sorting by rows."
         for i in range(height):
+            currentRowOrCol = i
+            iterationCount = 0
             sys.stdout.write("Processing row: %i/%i   \r" % (i, height) )
             sys.stdout.flush()
 
@@ -69,7 +197,6 @@ def sortImage():
             if randomInterval:
                 # Create random interval for row
                 rowInterval = random.randrange(2, interval)
-
 
             endOfLine = width
 
@@ -94,6 +221,8 @@ def sortImage():
         # Sort by columns
         print "Sorting by columns."
         for i in range(width):
+            currentRowOrCol = i
+            iterationCount = 0
             sys.stdout.write("Processing column: %i/%i   \r" % (i, width) )
             sys.stdout.flush()
 
@@ -176,7 +305,6 @@ def sort(array):
         cocktailSort(array, iterations)
 
 def circleEquation(mode, x, h, r):
-    # y	= +- sqrt(r^2 - x^2)
 
     y = math.sqrt( (r * r) - ( (x - h) * (x - h) ) )
 
@@ -199,6 +327,7 @@ def circleEquation(mode, x, h, r):
 #
 ################################################################################
 def bubbleSort(pixelLine, iterations, maxIterations):
+    global iterationCount, snapshotsPerRowOrCol
     iteration = 0
 
     while (iteration < iterations) and (iteration < len(pixelLine) - 1):
@@ -212,8 +341,14 @@ def bubbleSort(pixelLine, iterations, maxIterations):
                 temp = pixelLine[index]
                 pixelLine[index] = pixelLine[index + 1]
                 pixelLine[index + 1] = temp
+                if createGIF:
+                    if iterationCount % snapshotsPerRowOrCol == 0:
+                        saveSnapshot(list(pixelLine))
+                    iterationCount = iterationCount + 1
 
         iteration = iteration + 1
+
+
 
 ################################################################################
 #
@@ -247,8 +382,8 @@ def cocktailSort(pixelLine, numIterations):
 def quickSort(pixelLine, maxIterations):
     quickSortAlgorithm(pixelLine, 0, len(pixelLine) - 1, 0, maxIterations)
 
-
 def quickSortAlgorithm(pixelLine, low, high, iteration, maxIterations):
+   
    if iteration >= maxIterations:
        return;
 
@@ -263,14 +398,15 @@ def quickSortAlgorithm(pixelLine, low, high, iteration, maxIterations):
 
 
 def partition(pixelLine,low,high):
+    global iterationCount, snapshotsPerRowOrCol, createGIF
+    
+    pivotvalue = valueOfPixel(pixelLine[low])
 
-   pivotvalue = valueOfPixel(pixelLine[low])
+    leftmark = low + 1
+    rightmark = high
 
-   leftmark = low + 1
-   rightmark = high
-
-   done = False
-   while not done:
+    done = False
+    while not done:
 
        while leftmark <= rightmark and valueOfPixel(pixelLine[leftmark]) <= pivotvalue:
            leftmark = leftmark + 1
@@ -285,11 +421,16 @@ def partition(pixelLine,low,high):
            pixelLine[leftmark] = pixelLine[rightmark]
            pixelLine[rightmark] = temp
 
-   temp = pixelLine[low]
-   pixelLine[low] = pixelLine[rightmark]
-   pixelLine[rightmark] = temp
+    temp = pixelLine[low]
+    pixelLine[low] = pixelLine[rightmark]
+    pixelLine[rightmark] = temp
 
-   return rightmark
+    if createGIF:
+        if iterationCount % snapshotsPerRowOrCol == 0:
+            saveSnapshot(list(pixelLine))
+        iterationCount = iterationCount + 1
+
+    return rightmark
 
 ################################################################################
 #
@@ -321,23 +462,6 @@ def valueOfPixel(pixel):
 
 ################################################################################
 #
-#                             Image Saving
-#
-################################################################################
-def saveImage():
-    global fileName, image
-    baseName = os.path.splitext(fileName)[0]
-    saveName = baseName + "_output.png"
-    try:
-        image.save(saveName)
-    except:
-        print "Error: Cannot save as png. Attempting to save as jpg."
-        saveName = baseName + "_output.jpg"
-        image.save(saveName)
-
-
-################################################################################
-#
 #                             Settings functions
 #
 #   Gets user parameters from command line and
@@ -345,7 +469,7 @@ def saveImage():
 ################################################################################
 
 def getSettings():
-    global image, imagePixels, height, width, fileName, SORT_BY_ROWS, SORT_BY_COLUMNS, SORT_BY_CIRCLE, iterations, ALGORITHM, HEURISTIC, interval, randomInterval
+    global image, imagePixels, height, width, fileName, SORT_BY_ROWS, SORT_BY_COLUMNS, SORT_BY_CIRCLE, iterations, ALGORITHM, HEURISTIC, interval, randomInterval, createGIF, frameCount, snapshotsPerRowOrCol, KEEP_TEMP_FILES
 
     # Configure parser
     parser = argparse.ArgumentParser(description = "Pixel sort an image!", formatter_class=RawTextHelpFormatter)
@@ -364,6 +488,10 @@ def getSettings():
 
     parser.add_argument("-si", "--sortInterval", help="Sets the interval length to sort by. Use -r to make this random for each row/line.")
     parser.add_argument("-r", "--random", help="Sets the interval length for each row/column to be random integer between 2 and i.", action="store_true")
+
+    parser.add_argument("-g", "--gif", help="Creates a GIF animation of the pixel sort. Slows down computation time considerably due to IO.", action="store_true")
+    parser.add_argument("-f", "--frames", help="The number of frames that the created GIF will contain. Defaults to 50.")
+    parser.add_argument("-k", "--keepTempFiles", help="Keeps the temporary files created by the GIF creation process. Default is false.", action="store_true")
 
     args = parser.parse_args()
 
@@ -414,7 +542,6 @@ def getSettings():
         else:
             iterations = height
 
-
     if args.sortInterval:
         interval = int(args.sortInterval)
     else:
@@ -427,6 +554,36 @@ def getSettings():
     else:
         randomInterval = False
 
+    if args.gif:
+
+        if SORT_BY_CIRCLE:
+            print "ERROR: Cannot create a GIF of a circle sort."
+            exit()
+
+        createGIF = True
+        if args.frames:
+            frameCount = int(args.frames)
+        else:
+            frameCount = 100
+
+        if SORT_BY_ROWS:
+            snapshotsPerRowOrCol = math.floor(width / frameCount)
+            print "Num of iterations per row: %i" % snapshotsPerRowOrCol
+        else:
+            snapshotsPerRowOrCol = math.floor(height / frameCount)
+
+        if args.keepTempFiles:
+            KEEP_TEMP_FILES = args.keepTempFiles
+        else:
+            KEEP_TEMP_FILES = False
+    else:
+        createGIF = False
+
+
+def natural_sort(l): 
+    convert = lambda text: int(text) if text.isdigit() else text.lower() 
+    alphanum_key = lambda key: [ convert(c) for c in re.split('([0-9]+)', key) ] 
+    return sorted(l, key = alphanum_key)
 
 ################################################################################
 #
